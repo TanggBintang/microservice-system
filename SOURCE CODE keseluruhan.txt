@@ -1,0 +1,1477 @@
+# Panduan Lengkap Microservice Windows + VSCode + Docker Desktop
+
+## 🛠️ Prerequisites & Instalasi
+
+### 1. Install Docker Desktop for Windows
+- Download dari: https://www.docker.com/products/docker-desktop/
+- Install dan restart komputer
+- Pastikan Docker Desktop running (ikon whale di system tray)
+
+### 2. Install Node.js
+- Download dari: https://nodejs.org/en/download/
+- Pilih versi LTS (Long Term Support)
+
+### 3. Install Postman
+- Download dari: https://www.postman.com/downloads/
+
+### 4. Setup VSCode Extensions (Recommended)
+- Docker
+- PHP Intelephense
+- JavaScript (ES6) code snippets
+
+## 📁 Struktur Project
+
+Buat folder `microservice-system` di Desktop atau tempat yang mudah diakses:
+
+```
+microservice-system/
+├── docker-compose.yml
+├── api-gateway/
+│   ├── Dockerfile
+│   └── nginx.conf
+├── auth-service/
+│   ├── Dockerfile
+│   ├── index.php
+│   ├── config/
+│   │   └── database.php
+│   └── init.sql
+├── product-service/
+│   ├── Dockerfile
+│   ├── package.json
+│   ├── server.js
+│   └── models/
+│       └── Product.js
+└── README.md
+```
+
+## 🐳 File-File Konfigurasi
+
+### 1. docker-compose.yml (Root Directory)
+```yaml
+version: '3.8'
+
+services:
+  # MySQL Database - Start first
+  mysql:
+    image: mysql:8.0
+    container_name: microservice-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: auth_db
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppassword
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./auth-service/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3307:3306"  # Expose untuk debugging
+    networks:
+      - microservice-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # MongoDB Database
+  mongodb:
+    image: mongo:5.0
+    container_name: microservice-mongodb
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27018:27017"  # Expose untuk debugging
+    networks:
+      - microservice-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      timeout: 10s
+      retries: 5
+
+  # Auth Service (PHP + MySQL)
+  auth-service:
+    build: 
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: microservice-auth
+    environment:
+      - DB_HOST=mysql
+      - DB_NAME=auth_db
+      - DB_USER=root
+      - DB_PASS=rootpassword
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8081:80"  # Expose untuk debugging
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # Product Service (NodeJS + MongoDB)
+  product-service:
+    build: 
+      context: ./product-service
+      dockerfile: Dockerfile
+    container_name: microservice-product
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017/product_db
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "8082:3000"  # Expose untuk debugging
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # API Gateway (Nginx)
+  api-gateway:
+    build: 
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: microservice-gateway
+    ports:
+      - "8080:80"
+    depends_on:
+      - auth-service
+      - product-service
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+    driver: local
+  mongo_data:
+    driver: local
+
+networks:
+  microservice-network:
+    driver: bridge
+```
+
+### 2. API Gateway Files
+
+#### api-gateway/Dockerfile
+```dockerfile
+FROM nginx:alpine
+COPY nginx.conf /etc/nginx/nginx.conf
+EXPOSE 80
+```
+
+#### api-gateway/nginx.conf
+```nginx
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream auth-service {
+        server auth-service:80;
+    }
+    
+    upstream product-service {
+        server product-service:3000;
+    }
+
+    server {
+        listen 80;
+        
+        # Auth Service Routes
+        location /auth/ {
+            proxy_pass http://auth-service/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+        
+        # Product Service Routes
+        location /products/ {
+            proxy_pass http://product-service/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+        
+        # Health Check
+        location /health {
+            return 200 'API Gateway is running';
+            add_header Content-Type text/plain;
+        }
+    }
+}
+```
+
+### 3. Auth Service Files (PHP + MySQL)
+
+#### auth-service/Dockerfile
+```dockerfile
+FROM php:8.1-apache
+
+# Update package list dan install dependencies
+RUN apt-get update && apt-get install -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install required PHP extensions
+RUN docker-php-ext-install mysqli pdo pdo_mysql
+
+# Enable Apache modules
+RUN a2enmod rewrite headers
+
+# Create necessary directories
+RUN mkdir -p /var/www/html
+
+# Copy source code
+COPY . /var/www/html/
+
+# Set proper permissions
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 755 /var/www/html
+
+# Configure PHP for better error reporting
+RUN echo "log_errors = On" >> /usr/local/etc/php/php.ini \
+    && echo "error_log = /var/log/apache2/php_errors.log" >> /usr/local/etc/php/php.ini \
+    && echo "display_errors = On" >> /usr/local/etc/php/php.ini
+
+# Expose port
+EXPOSE 80
+
+# Start Apache
+CMD ["apache2-foreground"]
+```
+
+#### auth-service/index.php
+```php
+<?php
+// Enable error reporting for debugging
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
+
+// Handle preflight OPTIONS request
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit(0);
+}
+
+// Log request for debugging
+error_log("=== AUTH SERVICE DEBUG ===");
+error_log("Method: " . $_SERVER['REQUEST_METHOD']);
+error_log("URI: " . $_SERVER['REQUEST_URI']);
+error_log("Headers: " . json_encode(getallheaders()));
+
+// Simple routing
+$method = $_SERVER['REQUEST_METHOD'];
+$path = $_SERVER['REQUEST_URI'];
+
+// Remove query string if present
+$path = parse_url($path, PHP_URL_PATH);
+
+// Remove leading slash for easier matching
+$path = ltrim($path, '/');
+
+error_log("Processed path: " . $path);
+
+// Root endpoint - untuk testing
+if (empty($path) || $path === '' || $path === 'index.php') {
+    echo json_encode([
+        'message' => 'Auth Service is running',
+        'timestamp' => date('Y-m-d H:i:s'),
+        'endpoints' => [
+            'POST /token' => 'Get authentication token',
+            'GET /' => 'Service status'
+        ]
+    ]);
+    exit;
+}
+
+// Token endpoint
+if ($method === 'POST' && $path === 'token') {
+    error_log("=== TOKEN REQUEST PROCESSING ===");
+    
+    // Read JSON input
+    $rawInput = file_get_contents('php://input');
+    error_log("Raw input: " . $rawInput);
+    
+    $input = json_decode($rawInput, true);
+    
+    if (!$input) {
+        error_log("JSON decode failed");
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid JSON format']);
+        exit;
+    }
+    
+    if (!isset($input['username']) || !isset($input['password'])) {
+        error_log("Missing username or password");
+        http_response_code(400);
+        echo json_encode(['error' => 'Username and password required']);
+        exit;
+    }
+    
+    $username = $input['username'];
+    $password = $input['password'];
+    
+    error_log("Login attempt - Username: " . $username);
+    
+    // Database connection
+    try {
+        $host = $_ENV['DB_HOST'] ?? 'mysql';
+        $dbname = $_ENV['DB_NAME'] ?? 'auth_db';
+        $db_username = $_ENV['DB_USER'] ?? 'root';
+        $db_password = $_ENV['DB_PASS'] ?? 'rootpassword';
+        
+        error_log("Connecting to DB: $host, $dbname, $db_username");
+        
+        $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8", $db_username, $db_password);
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        error_log("Database connected successfully");
+        
+        // Check if users table exists and has data
+        $checkStmt = $pdo->query("SELECT COUNT(*) as count FROM users");
+        $userCount = $checkStmt->fetch()['count'];
+        error_log("Users in database: " . $userCount);
+        
+        // Simple authentication
+        $hashedPassword = md5($password);
+        error_log("Hashed password: " . $hashedPassword);
+        
+        $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ? AND password = ?");
+        $stmt->execute([$username, $hashedPassword]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($user) {
+            error_log("User found: " . json_encode($user));
+            
+            // Generate simple JWT-like token
+            $payload = [
+                'user_id' => $user['id'],
+                'username' => $user['username'],
+                'exp' => time() + 3600 // 1 hour
+            ];
+            
+            $token = base64_encode(json_encode($payload));
+            
+            echo json_encode([
+                'success' => true,
+                'token' => $token,
+                'user' => [
+                    'id' => $user['id'],
+                    'username' => $user['username']
+                ]
+            ]);
+        } else {
+            error_log("User not found or invalid credentials");
+            
+            // Debug: Show all users for troubleshooting
+            $allUsers = $pdo->query("SELECT username, password FROM users")->fetchAll();
+            error_log("All users in DB: " . json_encode($allUsers));
+            
+            http_response_code(401);
+            echo json_encode(['error' => 'Invalid credentials']);
+        }
+    } catch (Exception $e) {
+        error_log("Database error: " . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['error' => 'Database connection failed: ' . $e->getMessage()]);
+    }
+    exit;
+}
+
+// If no route matches
+error_log("No matching route found");
+http_response_code(404);
+echo json_encode([
+    'error' => 'Endpoint not found',
+    'method' => $method,
+    'path' => $path,
+    'available_endpoints' => [
+        'GET /' => 'Service info',
+        'POST /token' => 'Get authentication token'
+    ]
+]);
+?>
+```
+
+#### auth-service/config/database.php
+```php
+<?php
+$host = $_ENV['DB_HOST'] ?? 'mysql';
+$dbname = $_ENV['DB_NAME'] ?? 'auth_db';
+$username = $_ENV['DB_USER'] ?? 'root';
+$password = $_ENV['DB_PASS'] ?? 'rootpassword';
+
+try {
+    $pdo = new PDO("mysql:host=$host;dbname=$dbname", $username, $password);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch(PDOException $e) {
+    die("Connection failed: " . $e->getMessage());
+}
+?>
+```
+
+#### auth-service/init.sql
+```sql
+-- Create database if not exists
+CREATE DATABASE IF NOT EXISTS auth_db;
+USE auth_db;
+
+-- Create users table
+CREATE TABLE IF NOT EXISTS users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    email VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Insert sample users (password: admin123 -> MD5 hashed)
+-- MD5 hash of 'admin123' = '0192023a7bbd73250516f069df18b500'
+INSERT IGNORE INTO users (username, password, email) VALUES 
+('admin', '0192023a7bbd73250516f069df18b500', 'admin@example.com'),
+('user1', '0192023a7bbd73250516f069df18b500', 'user1@example.com'),
+('testuser', '0192023a7bbd73250516f069df18b500', 'test@example.com');
+
+-- Verify data
+SELECT 'Users created:' as status;
+SELECT username, email, created_at FROM users;
+```
+
+### 4. Product Service Files (NodeJS + MongoDB)
+
+#### product-service/Dockerfile
+```dockerfile
+FROM node:18-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
+```
+
+#### product-service/package.json
+```json
+{
+  "name": "product-service",
+  "version": "1.0.0",
+  "description": "Product microservice",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^7.5.0",
+    "cors": "^2.8.5"
+  }
+}
+```
+
+#### product-service/server.js
+```javascript
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const Product = require('./models/Product');
+
+const app = express();
+const PORT = 3000;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Database connection
+const mongoUrl = process.env.MONGO_URL || 'mongodb://localhost:27017/product_db';
+mongoose.connect(mongoUrl);
+
+// Simple JWT verification function
+function verifyToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Access token required' });
+    }
+    
+    try {
+        const decoded = JSON.parse(Buffer.from(token, 'base64').toString());
+        if (decoded.exp < Date.now() / 1000) {
+            return res.status(401).json({ error: 'Token expired' });
+        }
+        req.user = decoded;
+        next();
+    } catch (error) {
+        return res.status(403).json({ error: 'Invalid token' });
+    }
+}
+
+// Routes
+app.get('/', (req, res) => {
+    res.json({ message: 'Product Service is running' });
+});
+
+// Get all products (protected)
+app.get('/products', verifyToken, async (req, res) => {
+    try {
+        const products = await Product.find();
+        res.json({
+            success: true,
+            data: products,
+            user: req.user.username
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get product by ID (protected)
+app.get('/products/:id', verifyToken, async (req, res) => {
+    try {
+        const product = await Product.findById(req.params.id);
+        if (!product) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+        res.json({
+            success: true,
+            data: product
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Create product (protected)
+app.post('/products', verifyToken, async (req, res) => {
+    try {
+        const product = new Product(req.body);
+        await product.save();
+        res.status(201).json({
+            success: true,
+            data: product
+        });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// Initialize sample data
+async function initializeData() {
+    try {
+        const count = await Product.countDocuments();
+        if (count === 0) {
+            const sampleProducts = [
+                {
+                    name: 'Laptop Gaming',
+                    description: 'High-performance gaming laptop',
+                    price: 15000000,
+                    category: 'Electronics',
+                    stock: 10
+                },
+                {
+                    name: 'Smartphone',
+                    description: 'Latest Android smartphone',
+                    price: 8000000,
+                    category: 'Electronics',
+                    stock: 25
+                },
+                {
+                    name: 'Wireless Headphones',
+                    description: 'Premium noise-canceling headphones',
+                    price: 2500000,
+                    category: 'Audio',
+                    stock: 15
+                }
+            ];
+            await Product.insertMany(sampleProducts);
+            console.log('Sample products created');
+        }
+    } catch (error) {
+        console.error('Error initializing data:', error);
+    }
+}
+
+app.listen(PORT, () => {
+    console.log(`Product service running on port ${PORT}`);
+    initializeData();
+});
+```
+
+#### product-service/models/Product.js
+```javascript
+const mongoose = require('mongoose');
+
+const productSchema = new mongoose.Schema({
+    name: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    description: {
+        type: String,
+        required: true
+    },
+    price: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    category: {
+        type: String,
+        required: true
+    },
+    stock: {
+        type: Number,
+        required: true,
+        min: 0,
+        default: 0
+    },
+    created_at: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+module.exports = mongoose.model('Product', productSchema);
+```
+
+
+# Shipping Service Files
+
+## 1. shipping-service/Dockerfile
+```dockerfile
+FROM node:18-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
+```
+
+## 2. shipping-service/package.json
+```json
+{
+  "name": "shipping-service",
+  "version": "1.0.0",
+  "description": "Shipping microservice",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^7.5.0",
+    "cors": "^2.8.5",
+    "axios": "^1.5.0"
+  }
+}
+```
+
+## 3. shipping-service/server.js
+```javascript
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const axios = require('axios');
+const Shipping = require('./models/Shipping');
+
+const app = express();
+const PORT = 3000;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Database connection
+const mongoUrl = process.env.MONGO_URL || 'mongodb://localhost:27017/shipping_db';
+mongoose.connect(mongoUrl);
+
+// Simple JWT verification function
+function verifyToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Access token required' });
+    }
+    
+    try {
+        const decoded = JSON.parse(Buffer.from(token, 'base64').toString());
+        if (decoded.exp < Date.now() / 1000) {
+            return res.status(401).json({ error: 'Token expired' });
+        }
+        req.user = decoded;
+        next();
+    } catch (error) {
+        return res.status(403).json({ error: 'Invalid token' });
+    }
+}
+
+// Helper function to validate product exists
+async function validateProduct(productId) {
+    try {
+        // In real scenario, this would call Product Service API
+        // For demo, we'll simulate product validation
+        const validProducts = ['6507f1f1e4b0c12345678901', '6507f1f1e4b0c12345678902', '6507f1f1e4b0c12345678903'];
+        return validProducts.includes(productId) || productId.length === 24; // Basic MongoDB ObjectId validation
+    } catch (error) {
+        return false;
+    }
+}
+
+// Helper function to calculate shipping cost
+function calculateShippingCost(destination, weight, shippingType) {
+    const baseCost = {
+        'standard': 10000,
+        'express': 25000,
+        'overnight': 50000
+    };
+    
+    const weightMultiplier = Math.ceil(weight / 1000); // per kg
+    const base = baseCost[shippingType] || baseCost['standard'];
+    
+    // Distance-based multiplier (simplified)
+    const distanceMultiplier = destination.toLowerCase().includes('jakarta') ? 1 : 1.5;
+    
+    return base * weightMultiplier * distanceMultiplier;
+}
+
+// Routes
+app.get('/', (req, res) => {
+    res.json({ 
+        message: 'Shipping Service is running',
+        endpoints: {
+            'GET /': 'Service info',
+            'GET /shipments': 'Get all shipments (protected)',
+            'GET /shipments/:id': 'Get shipment by ID (protected)',
+            'POST /shipments': 'Create new shipment (protected)',
+            'PUT /shipments/:id/status': 'Update shipment status (protected)',
+            'GET /calculate-cost': 'Calculate shipping cost (protected)'
+        }
+    });
+});
+
+// Calculate shipping cost
+app.get('/calculate-cost', verifyToken, (req, res) => {
+    const { destination, weight, shippingType = 'standard' } = req.query;
+    
+    if (!destination || !weight) {
+        return res.status(400).json({ 
+            error: 'Destination and weight are required',
+            example: '/calculate-cost?destination=Jakarta&weight=1500&shippingType=express'
+        });
+    }
+    
+    const cost = calculateShippingCost(destination, parseFloat(weight), shippingType);
+    
+    res.json({
+        success: true,
+        data: {
+            destination,
+            weight: `${weight}g`,
+            shippingType,
+            estimatedCost: cost,
+            currency: 'IDR',
+            estimatedDays: shippingType === 'overnight' ? 1 : shippingType === 'express' ? 2 : 5
+        }
+    });
+});
+
+// Get all shipments (protected)
+app.get('/shipments', verifyToken, async (req, res) => {
+    try {
+        const { status, destination } = req.query;
+        let filter = {};
+        
+        if (status) filter.status = status;
+        if (destination) filter.destination = new RegExp(destination, 'i');
+        
+        const shipments = await Shipping.find(filter).sort({ createdAt: -1 });
+        
+        res.json({
+            success: true,
+            data: shipments,
+            count: shipments.length,
+            user: req.user.username
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get shipment by ID (protected)
+app.get('/shipments/:id', verifyToken, async (req, res) => {
+    try {
+        const shipment = await Shipping.findById(req.params.id);
+        if (!shipment) {
+            return res.status(404).json({ error: 'Shipment not found' });
+        }
+        res.json({
+            success: true,
+            data: shipment
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Create new shipment (protected)
+app.post('/shipments', verifyToken, async (req, res) => {
+    try {
+        const { 
+            productIds, 
+            customerName, 
+            customerPhone, 
+            destination, 
+            address,
+            totalWeight,
+            shippingType = 'standard'
+        } = req.body;
+        
+        // Validation
+        if (!productIds || !customerName || !destination || !address || !totalWeight) {
+            return res.status(400).json({ 
+                error: 'Missing required fields: productIds, customerName, destination, address, totalWeight' 
+            });
+        }
+        
+        // Calculate shipping cost
+        const shippingCost = calculateShippingCost(destination, totalWeight, shippingType);
+        
+        // Generate tracking number
+        const trackingNumber = 'SHIP' + Date.now() + Math.random().toString(36).substr(2, 4).toUpperCase();
+        
+        const shipment = new Shipping({
+            trackingNumber,
+            productIds,
+            customerName,
+            customerPhone,
+            destination,
+            address,
+            totalWeight,
+            shippingType,
+            shippingCost,
+            status: 'pending',
+            createdBy: req.user.user_id,
+            statusHistory: [{
+                status: 'pending',
+                timestamp: new Date(),
+                notes: 'Shipment created'
+            }]
+        });
+        
+        await shipment.save();
+        
+        res.status(201).json({
+            success: true,
+            data: shipment,
+            message: 'Shipment created successfully'
+        });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// Update shipment status (protected)
+app.put('/shipments/:id/status', verifyToken, async (req, res) => {
+    try {
+        const { status, notes = '' } = req.body;
+        
+        const validStatuses = ['pending', 'processing', 'shipped', 'in_transit', 'delivered', 'cancelled'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({ 
+                error: 'Invalid status',
+                validStatuses 
+            });
+        }
+        
+        const shipment = await Shipping.findById(req.params.id);
+        if (!shipment) {
+            return res.status(404).json({ error: 'Shipment not found' });
+        }
+        
+        // Add to status history
+        shipment.statusHistory.push({
+            status,
+            timestamp: new Date(),
+            notes,
+            updatedBy: req.user.username
+        });
+        
+        shipment.status = status;
+        if (status === 'delivered') {
+            shipment.deliveredAt = new Date();
+        }
+        
+        await shipment.save();
+        
+        res.json({
+            success: true,
+            data: shipment,
+            message: `Shipment status updated to ${status}`
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get shipment tracking info (public endpoint)
+app.get('/track/:trackingNumber', async (req, res) => {
+    try {
+        const shipment = await Shipping.findOne({ 
+            trackingNumber: req.params.trackingNumber 
+        }).select('-createdBy -productIds');
+        
+        if (!shipment) {
+            return res.status(404).json({ error: 'Tracking number not found' });
+        }
+        
+        res.json({
+            success: true,
+            data: {
+                trackingNumber: shipment.trackingNumber,
+                status: shipment.status,
+                destination: shipment.destination,
+                customerName: shipment.customerName,
+                shippingType: shipment.shippingType,
+                createdAt: shipment.createdAt,
+                deliveredAt: shipment.deliveredAt,
+                statusHistory: shipment.statusHistory
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Initialize sample data
+async function initializeData() {
+    try {
+        const count = await Shipping.countDocuments();
+        if (count === 0) {
+            const sampleShipments = [
+                {
+                    trackingNumber: 'SHIP1703001DEMO',
+                    productIds: ['sample_product_1', 'sample_product_2'],
+                    customerName: 'John Doe',
+                    customerPhone: '08123456789',
+                    destination: 'Jakarta',
+                    address: 'Jl. Sudirman No. 123, Jakarta Pusat',
+                    totalWeight: 2500,
+                    shippingType: 'express',
+                    shippingCost: 37500,
+                    status: 'in_transit',
+                    statusHistory: [
+                        {
+                            status: 'pending',
+                            timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+                            notes: 'Shipment created'
+                        },
+                        {
+                            status: 'processing',
+                            timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+                            notes: 'Package prepared'
+                        },
+                        {
+                            status: 'shipped',
+                            timestamp: new Date(Date.now() - 12 * 60 * 60 * 1000),
+                            notes: 'Package picked up by courier'
+                        },
+                        {
+                            status: 'in_transit',
+                            timestamp: new Date(Date.now() - 6 * 60 * 60 * 1000),
+                            notes: 'Package in transit to Jakarta'
+                        }
+                    ]
+                },
+                {
+                    trackingNumber: 'SHIP1703002DEMO',
+                    productIds: ['sample_product_3'],
+                    customerName: 'Jane Smith',
+                    customerPhone: '08987654321',
+                    destination: 'Surabaya',
+                    address: 'Jl. Pemuda No. 456, Surabaya',
+                    totalWeight: 1200,
+                    shippingType: 'standard',
+                    shippingCost: 15000,
+                    status: 'delivered',
+                    deliveredAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+                    statusHistory: [
+                        {
+                            status: 'pending',
+                            timestamp: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+                            notes: 'Shipment created'
+                        },
+                        {
+                            status: 'processing',
+                            timestamp: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000),
+                            notes: 'Package prepared'
+                        },
+                        {
+                            status: 'shipped',
+                            timestamp: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+                            notes: 'Package picked up'
+                        },
+                        {
+                            status: 'in_transit',
+                            timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+                            notes: 'Package in transit'
+                        },
+                        {
+                            status: 'delivered',
+                            timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+                            notes: 'Package delivered successfully'
+                        }
+                    ]
+                }
+            ];
+            
+            await Shipping.insertMany(sampleShipments);
+            console.log('Sample shipments created');
+        }
+    } catch (error) {
+        console.error('Error initializing shipping data:', error);
+    }
+}
+
+app.listen(PORT, () => {
+    console.log(`Shipping service running on port ${PORT}`);
+    initializeData();
+});
+```
+
+## 4. shipping-service/models/Shipping.js
+```javascript
+const mongoose = require('mongoose');
+
+const statusHistorySchema = new mongoose.Schema({
+    status: {
+        type: String,
+        required: true,
+        enum: ['pending', 'processing', 'shipped', 'in_transit', 'delivered', 'cancelled']
+    },
+    timestamp: {
+        type: Date,
+        default: Date.now
+    },
+    notes: {
+        type: String,
+        default: ''
+    },
+    updatedBy: {
+        type: String,
+        default: 'system'
+    }
+});
+
+const shippingSchema = new mongoose.Schema({
+    trackingNumber: {
+        type: String,
+        required: true,
+        unique: true,
+        trim: true
+    },
+    productIds: [{
+        type: String,
+        required: true
+    }],
+    customerName: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    customerPhone: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    destination: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    address: {
+        type: String,
+        required: true
+    },
+    totalWeight: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    shippingType: {
+        type: String,
+        required: true,
+        enum: ['standard', 'express', 'overnight'],
+        default: 'standard'
+    },
+    shippingCost: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    status: {
+        type: String,
+        required: true,
+        enum: ['pending', 'processing', 'shipped', 'in_transit', 'delivered', 'cancelled'],
+        default: 'pending'
+    },
+    statusHistory: [statusHistorySchema],
+    createdBy: {
+        type: String,
+        required: false
+    },
+    deliveredAt: {
+        type: Date,
+        default: null
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+// Update updatedAt before saving
+shippingSchema.pre('save', function(next) {
+    this.updatedAt = Date.now();
+    next();
+});
+
+module.exports = mongoose.model('Shipping', shippingSchema);
+```
+
+## 5. Updated docker-compose.yml
+```yaml
+version: '3.8'
+
+services:
+  # MySQL Database - Start first
+  mysql:
+    image: mysql:8.0
+    container_name: microservice-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: auth_db
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppassword
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./auth-service/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3307:3306"
+    networks:
+      - microservice-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # MongoDB Database for Products
+  mongodb-product:
+    image: mongo:5.0
+    container_name: microservice-mongodb-product
+    volumes:
+      - mongo_product_data:/data/db
+    ports:
+      - "27018:27017"
+    networks:
+      - microservice-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      timeout: 10s
+      retries: 5
+
+  # MongoDB Database for Shipping
+  mongodb-shipping:
+    image: mongo:5.0
+    container_name: microservice-mongodb-shipping
+    volumes:
+      - mongo_shipping_data:/data/db
+    ports:
+      - "27019:27017"
+    networks:
+      - microservice-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      timeout: 10s
+      retries: 5
+
+  # Auth Service (PHP + MySQL)
+  auth-service:
+    build: 
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: microservice-auth
+    environment:
+      - DB_HOST=mysql
+      - DB_NAME=auth_db
+      - DB_USER=root
+      - DB_PASS=rootpassword
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8081:80"
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # Product Service (NodeJS + MongoDB)
+  product-service:
+    build: 
+      context: ./product-service
+      dockerfile: Dockerfile
+    container_name: microservice-product
+    environment:
+      - MONGO_URL=mongodb://mongodb-product:27017/product_db
+    depends_on:
+      mongodb-product:
+        condition: service_healthy
+    ports:
+      - "8082:3000"
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # Shipping Service (NodeJS + MongoDB)
+  shipping-service:
+    build: 
+      context: ./shipping-service
+      dockerfile: Dockerfile
+    container_name: microservice-shipping
+    environment:
+      - MONGO_URL=mongodb://mongodb-shipping:27017/shipping_db
+    depends_on:
+      mongodb-shipping:
+        condition: service_healthy
+    ports:
+      - "8083:3000"
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # API Gateway (Nginx)
+  api-gateway:
+    build: 
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: microservice-gateway
+    ports:
+      - "8080:80"
+    depends_on:
+      - auth-service
+      - product-service
+      - shipping-service
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+    driver: local
+  mongo_product_data:
+    driver: local
+  mongo_shipping_data:
+    driver: local
+
+networks:
+  microservice-network:
+    driver: bridge
+```
+
+## 6. Updated api-gateway/nginx.conf
+```nginx
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream auth-service {
+        server auth-service:80;
+    }
+    
+    upstream product-service {
+        server product-service:3000;
+    }
+    
+    upstream shipping-service {
+        server shipping-service:3000;
+    }
+
+    server {
+        listen 80;
+        
+        # Auth Service Routes
+        location /auth/ {
+            proxy_pass http://auth-service/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+        
+        # Product Service Routes
+        location /products/ {
+            proxy_pass http://product-service/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+        
+        # Shipping Service Routes
+        location /shipping/ {
+            proxy_pass http://shipping-service/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+        
+        # Public tracking endpoint (no auth required)
+        location /track/ {
+            proxy_pass http://shipping-service/track/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+        
+        # Health Check
+        location /health {
+            return 200 'API Gateway is running - All services available';
+            add_header Content-Type text/plain;
+        }
+    }
+}
+```
+## 🚀 Langkah-Langkah Setup
+
+### 1. Buat Struktur Folder
+Buka Command Prompt atau PowerShell di Windows:
+
+```bash
+# Buat folder utama
+mkdir microservice-system
+cd microservice-system
+
+# Buat subfolder
+mkdir api-gateway auth-service product-service
+mkdir auth-service\config product-service\models
+```
+
+### 2. Copy Semua File
+- Salin semua kode di atas ke file-file yang sesuai
+- Pastikan struktur folder sesuai dengan diagram di atas
+
+### 3. Build dan Run dengan Docker
+```bash
+# Di folder microservice-system
+docker-compose up --build
+```
+
+### 4. Verifikasi Container Running
+```bash
+docker ps
+```
+Seharusnya ada 5 container running: api-gateway, auth-service, product-service, mysql, mongodb
+
+## 🧪 Testing dengan Postman
+
+### 1. Test API Gateway Health
+- **Method**: GET
+- **URL**: `http://localhost:8080/health`
+- **Expected**: "API Gateway is running"
+
+### 2. Test Login (Get Token)
+- **Method**: POST
+- **URL**: `http://localhost:8080/auth/token`
+- **Headers**: Content-Type: application/json
+- **Body** (raw JSON):
+```json
+{
+    "username": "admin",
+    "password": "admin123"
+}
+```
+- **Expected**: Token dalam response
+
+### 3. Test Get Products (Protected)
+- **Method**: GET
+- **URL**: `http://localhost:8080/products/products`
+- **Headers**: 
+  - Content-Type: application/json
+  - Authorization: Bearer YOUR_TOKEN_HERE
+- **Expected**: List of products
+
+### 4. Test Create Product
+- **Method**: POST
+- **URL**: `http://localhost:8080/products/products`
+- **Headers**: 
+  - Content-Type: application/json
+  - Authorization: Bearer YOUR_TOKEN_HERE
+- **Body** (raw JSON):
+```json
+{
+    "name": "New Product",
+    "description": "Product description",
+    "price": 100000,
+    "category": "Test",
+    "stock": 5
+}
+```
+
+## 🔧 Troubleshooting
+
+### Jika Container Tidak Jalan:
+1. Pastikan Docker Desktop running
+2. Check logs: `docker-compose logs`
+3. Restart: `docker-compose down && docker-compose up --build`
+
+### Jika Port Conflict:
+- Ganti port 8080 ke port lain di docker-compose.yml
+
+### Jika Database Connection Error:
+- Wait 30-60 detik untuk database initialization
+- Check container logs: `docker logs microservice-system_mysql_1`
+
+## 📊 Arsitektur Sistem
+
+```
+Client/Postman
+      ↓
+API Gateway (Nginx) :8080
+    ↓         ↓
+Auth Service   Product Service
+(PHP + MySQL)  (NodeJS + MongoDB)
+    ↓              ↓
+MySQL DB       MongoDB
+```
+
+## 🎯 Fitur yang Sudah Diimplementasi
+
+✅ API Gateway dengan Nginx  
+✅ Auth Service dengan JWT-like token  
+✅ Product Service dengan MongoDB  
+✅ Database terpisah untuk setiap service  
+✅ Token-based authentication  
+✅ CRUD operations untuk products  
+✅ Docker containerization  
+✅ Health checks  
+
+**Sistem siap untuk testing dan development!**
