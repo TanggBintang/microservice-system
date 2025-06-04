@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  # MySQL Database - Start first
+  mysql:
+    image: mysql:8.0
+    container_name: microservice-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: auth_db
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppassword
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./auth-service/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3307:3306"
+    networks:
+      - microservice-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # MongoDB Database for Products
+  mongodb-product:
+    image: mongo:5.0
+    container_name: microservice-mongodb-product
+    volumes:
+      - mongo_product_data:/data/db
+    ports:
+      - "27018:27017"
+    networks:
+      - microservice-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      timeout: 10s
+      retries: 5
+
+  # MongoDB Database for Shipping
+  mongodb-shipping:
+    image: mongo:5.0
+    container_name: microservice-mongodb-shipping
+    volumes:
+      - mongo_shipping_data:/data/db
+    ports:
+      - "27019:27017"
+    networks:
+      - microservice-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      timeout: 10s
+      retries: 5
+
+  # Auth Service (PHP + MySQL)
+  auth-service:
+    build: 
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: microservice-auth
+    environment:
+      - DB_HOST=mysql
+      - DB_NAME=auth_db
+      - DB_USER=root
+      - DB_PASS=rootpassword
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8081:80"
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # Product Service (NodeJS + MongoDB)
+  product-service:
+    build: 
+      context: ./product-service
+      dockerfile: Dockerfile
+    container_name: microservice-product
+    environment:
+      - MONGO_URL=mongodb://mongodb-product:27017/product_db
+    depends_on:
+      mongodb-product:
+        condition: service_healthy
+    ports:
+      - "8082:3000"
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # Shipping Service (NodeJS + MongoDB)
+  shipping-service:
+    build: 
+      context: ./shipping-service
+      dockerfile: Dockerfile
+    container_name: microservice-shipping
+    environment:
+      - MONGO_URL=mongodb://mongodb-shipping:27017/shipping_db
+    depends_on:
+      mongodb-shipping:
+        condition: service_healthy
+    ports:
+      - "8083:3000"
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+  # API Gateway (Nginx)
+  api-gateway:
+    build: 
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: microservice-gateway
+    ports:
+      - "8080:80"
+    depends_on:
+      - auth-service
+      - product-service
+      - shipping-service
+    networks:
+      - microservice-network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+    driver: local
+  mongo_product_data:
+    driver: local
+  mongo_shipping_data:
+    driver: local
+
+networks:
+  microservice-network:
+    driver: bridge
