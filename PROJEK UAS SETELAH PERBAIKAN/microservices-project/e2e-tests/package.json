@@ -1,0 +1,25 @@
+{
+  "name": "microservices-e2e-tests",
+  "version": "1.0.0",
+  "description": "End-to-end tests for microservices application",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:ui": "playwright test --ui",
+    "test:report": "playwright show-report",
+    "test:auth": "playwright test tests/auth.spec.js",
+    "test:products": "playwright test tests/products.spec.js",
+    "test:orders": "playwright test tests/orders.spec.js",
+    "test:navigation": "playwright test tests/navigation.spec.js",
+    "test:home": "playwright test tests/home.spec.js",
+    "install:browsers": "playwright install"
+  },
+  "keywords": ["playwright", "testing", "e2e", "microservices"],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  }
+}

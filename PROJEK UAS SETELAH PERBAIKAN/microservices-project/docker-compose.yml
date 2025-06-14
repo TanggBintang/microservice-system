@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  # Database untuk Auth Service
+  auth-db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: auth_db
+      MYSQL_USER: authuser
+      MYSQL_PASSWORD: authpass
+    ports:
+      - "3307:3306"
+    volumes:
+      - auth_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Database untuk Services lainnya
+  app-db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: app_db
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppass
+    ports:
+      - "3308:3306"
+    volumes:
+      - app_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Auth Service (PHP)
+  auth-service:
+    build: ./auth-service
+    ports:
+      - "8001:80"
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: auth-db
+      DB_NAME: auth_db
+      DB_USER: authuser
+      DB_PASS: authpass
+
+  # Product Service (Node.js)
+  product-service:
+    build: ./product-service
+    ports:
+      - "8002:3000"
+    depends_on:
+      app-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: app-db
+      DB_NAME: app_db
+      DB_USER: appuser
+      DB_PASS: apppass
+
+  # Order Service (Node.js)
+  order-service:
+    build: ./order-service
+    ports:
+      - "8003:3000"
+    depends_on:
+      app-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: app-db
+      DB_NAME: app_db
+      DB_USER: appuser
+      DB_PASS: apppass
+
+  # Shipping Service (Node.js)
+  shipping-service:
+    build: ./shipping-service
+    ports:
+      - "8004:3000"
+    depends_on:
+      app-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: app-db
+      DB_NAME: app_db
+      DB_USER: appuser
+      DB_PASS: apppass
+
+  # Frontend (React)
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+
+  # API Gateway (Nginx)
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "8000:80"
+    depends_on:
+      - auth-service
+      - product-service
+      - order-service
+      - shipping-service
+
+volumes:
+  auth_data:
+  app_data:
